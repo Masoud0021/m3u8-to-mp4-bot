@@ -1,5 +1,6 @@
 import os
 import subprocess
+import asyncio
 import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -19,11 +20,47 @@ async def handle_m3u8(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filename = f"{chat_id}.mp4"
     video_path = os.path.join(DOWNLOAD_FOLDER, filename)
 
-    await update.message.reply_text("🚀 درحال دانلود و تبدیل... لطفاً صبر کن.")
+    msg = await update.message.reply_text("🚀 شروع دانلود و تبدیل...")
+
+    # ساخت دستور ffmpeg با خروجی پیشرفت
+    cmd = [
+        "ffmpeg",
+        "-i", url,
+        "-preset", "fast",
+        "-c", "copy",
+        "-progress", "pipe:1",
+        video_path
+    ]
+
+    process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+
+    duration = None
+    out_time_ms = 0
+
+    while True:
+        line = await process.stdout.readline()
+        if not line:
+            break
+        line = line.decode('utf-8').strip()
+        if line.startswith("duration="):
+            duration = int(line.split('=')[1])
+        if line.startswith("out_time_ms="):
+            out_time_ms = int(line.split('=')[1])
+            if duration:
+                progress = out_time_ms / (duration * 1000000)
+                percentage = int(progress * 100)
+                await msg.edit_text(f"🚀 در حال تبدیل: {percentage}%")
+    
+    await process.wait()
+    retcode = process.returncode
+
+    if retcode != 0:
+        await msg.edit_text("❌ خطا در تبدیل ویدیو.")
+        return
+
+    await msg.edit_text("✅ تبدیل تمام شد! در حال آپلود...")
 
     try:
-        subprocess.run(["ffmpeg", "-i", url, "-preset", "fast", "-c", "copy", video_path], check=True)
-
         with open(video_path, 'rb') as f:
             files = {'file': (filename, f)}
             response = requests.post(GOFILE_API, files=files)
@@ -38,7 +75,7 @@ async def handle_m3u8(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.remove(video_path)
 
     except Exception as e:
-        await update.message.reply_text(f"❌ خطا در تبدیل یا آپلود: {e}")
+        await update.message.reply_text(f"❌ خطا در آپلود: {e}")
 
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(CommandHandler("start", start))
